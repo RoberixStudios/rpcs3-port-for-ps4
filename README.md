@@ -1,8 +1,7 @@
 # RPCS3 PORT FOR PS4 0.40 - source code
 
 **RPCS3 PORT FOR PS4** is a port of [RPCS3](https://rpcs3.net), the PlayStation 3 emulator, to
-PlayStation 4 consoles running the GoldHEN homebrew enabler. It is made by **Roberix Studio & Mifi
-Studios**.
+PlayStation 4 consoles running the GoldHEN homebrew enabler.
 
 > **Unofficial project.** It is not affiliated with Sony Interactive Entertainment or the RPCS3 team.
 > Please do not ask the RPCS3 team for support with this port.
@@ -114,7 +113,7 @@ the dependency scripts in `ps4-port/`, one CMake/Ninja target (`rpcs3_ps4_elf`) 
 - **RPCS3**: the whole emulation core, the renderers, the recompilers and the interface icons are the
   work of the RPCS3 team and its contributors (https://rpcs3.net, https://github.com/RPCS3/rpcs3),
   licensed under GPL-2.0. This port is distributed under the same license.
-- **PS4 port**: Roberix Studio & Mifi Studios (also the application icon, the studio logo).
+- **PS4 port**: Roberix Studio (also the application icon, the studio logo).
 - **orbis-compat** and **orbis-porting-kit** (orbis-ports, by Mikołaj Mikołajczyk, MIT): the PS4
   compatibility runtime and the Vulkan loader the port is built on.
 - **OpenOrbis PS4 Toolchain**: the SDK, the C/C++ runtime and the packaging tools.
