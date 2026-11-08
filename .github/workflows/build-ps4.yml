@@ -134,7 +134,12 @@ jobs:
           $env:OO_PS4_TOOLCHAIN = $env:RPCS3_PS4_SDK
           $env:RPCS3_PS4_LLVM_BIN = $env:RPCS3_PS4_LLVM_BIN
           New-Item -ItemType Directory -Force (Join-Path $repo 'ps4-port/.build-tools') | Out-Null
-          Copy-Item (Join-Path (Get-Command ninja).Source) (Join-Path $repo 'ps4-port/.build-tools/ninja.exe') -Force
+          $ninjaCommand = Get-Command ninja -CommandType Application -ErrorAction Stop
+          $ninjaPath = $ninjaCommand.Path
+          if ([string]::IsNullOrWhiteSpace($ninjaPath) -or !(Test-Path -LiteralPath $ninjaPath -PathType Leaf)) {
+            throw "Could not resolve the Ninja executable path. Command details: $($ninjaCommand | Format-List * | Out-String)"
+          }
+          Copy-Item -LiteralPath $ninjaPath -Destination (Join-Path $repo 'ps4-port/.build-tools/ninja.exe') -Force
           & "$repo/ps4-port/prepare-abseil.ps1"
           if ($LASTEXITCODE) { throw 'Abseil preparation failed' }
           & "$repo/ps4-port/prepare-make.ps1" -GitUsrBin 'C:/Program Files/Git/usr/bin'
