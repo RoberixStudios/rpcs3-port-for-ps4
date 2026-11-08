@@ -74,14 +74,11 @@ jobs:
 
           $expected = @{
             $sdkArchive = '3c7cd5bb593ca74fa1c13fd59f3938dc0fc07985167f7275063019e63abe4526'
-            $llvmArchive = 'TO_BE_VALIDATED'
             $mesaArchive = '4dd2b834ee97c5de4ce423244078db07c161426030ca20c175143fb9ef26da53'
           }
           foreach ($file in $expected.Keys) {
-            if ($expected[$file] -ne 'TO_BE_VALIDATED') {
-              $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
-              if ($actual -ne $expected[$file]) { throw "SHA-256 mismatch: $file" }
-            }
+            $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $expected[$file]) { throw "SHA-256 mismatch: $file" }
           }
 
           $sdkExtract = Join-Path $tools 'openorbis'
@@ -92,10 +89,10 @@ jobs:
           Expand-Archive -LiteralPath $llvmArchive -DestinationPath $llvmExtract -Force
           tar -xzf $mesaArchive -C $mesaExtract
 
-          $sdk = Get-ChildItem -LiteralPath $sdkExtract -Directory -Recurse |
-            Where-Object { (Test-Path (Join-Path $_.FullName 'include/orbis')) -and
-                           (Test-Path (Join-Path $_.FullName 'lib/libc++.a')) -and
-                           (Test-Path (Join-Path $_.FullName 'link.x')) } |
+          $sdkCandidates = @((Get-Item -LiteralPath $sdkExtract)) + @(Get-ChildItem -LiteralPath $sdkExtract -Directory -Recurse)
+          $sdk = $sdkCandidates | Where-Object { (Test-Path (Join-Path $_.FullName 'include/orbis')) -and
+                                                  (Test-Path (Join-Path $_.FullName 'lib/libc++.a')) -and
+                                                  (Test-Path (Join-Path $_.FullName 'link.x')) } |
             Select-Object -First 1
           if (!$sdk) { throw 'Could not locate the extracted OpenOrbis PS4Toolchain root' }
           $llvm = Get-ChildItem -LiteralPath $llvmExtract -Directory -Recurse |
@@ -123,10 +120,14 @@ jobs:
           if ($LASTEXITCODE) { throw 'Could not check out the pinned orbis-porting-kit commit' }
 
           $repo = Join-Path $env:GITHUB_WORKSPACE 'rpcs3-ps4'
-          $gitlink = git -C $repo ls-tree HEAD 3rdparty/llvm/llvm
-          if (!$gitlink -or $gitlink -notmatch '160000 commit ca7933e47d3a3451d81e72ac174dcb5aa28b59d1') {
-            throw "Unexpected LLVM submodule pin: $gitlink"
-          }
+          # The outer repository stores the RPCS3 source as a directory. The native
+          # packaging scripts expect that directory itself to be a Git work tree.
+          git -C $repo init
+          if ($LASTEXITCODE) { throw 'Could not initialize the source metadata repository' }
+          git -C $repo update-index --add --cacheinfo '160000,ca7933e47d3a3451d81e72ac174dcb5aa28b59d1,3rdparty/llvm/llvm'
+          if ($LASTEXITCODE) { throw 'Could not record the pinned LLVM gitlink' }
+          git -C $repo -c user.name='GitHub Actions' -c user.email='actions@github.com' commit --allow-empty -m 'Record RPCS3 source and LLVM pin for native build'
+          if ($LASTEXITCODE) { throw 'Could not create local source metadata commit' }
 
           $env:OO_PS4_TOOLCHAIN = $env:RPCS3_PS4_SDK
           $env:RPCS3_PS4_LLVM_BIN = $env:RPCS3_PS4_LLVM_BIN
