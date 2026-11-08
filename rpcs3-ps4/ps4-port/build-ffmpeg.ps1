@@ -10,12 +10,33 @@ param(
 $ErrorActionPreference = 'Stop'
 $source = Join-Path $PSScriptRoot 'deps/ffmpeg'
 $revision = '239f2c733de417201d7ad3b3b8b0d9b63285b2b1' # FFmpeg n8.1.1
-if (!(Test-Path "$source/configure")) {
-    & git -c credential.interactive=never -c http.sslBackend=openssl clone --depth 1 --branch n8.1.1 https://github.com/FFmpeg/FFmpeg.git $source
-    if ($LASTEXITCODE) { throw 'FFmpeg checkout failed' }
+
+# CMake/Ninja may request the multi-output FFmpeg rule from more than one
+# dependency edge. Serialize checkout so two PowerShell processes cannot race
+# while creating the same source directory.
+$checkoutMutex = [System.Threading.Mutex]::new($false, 'Local\RPCS3PS4FFmpegCheckout')
+$checkoutLock = $false
+try {
+    $checkoutLock = $checkoutMutex.WaitOne([TimeSpan]::FromMinutes(10))
+    if (!$checkoutLock) { throw 'Timed out waiting for the FFmpeg checkout lock' }
+
+    if (!(Test-Path (Join-Path $source 'configure'))) {
+        # A previous interrupted clone or an empty directory is not a usable
+        # checkout. Recreate this generated dependency directory cleanly.
+        if (Test-Path -LiteralPath $source) {
+            Remove-Item -LiteralPath $source -Recurse -Force
+        }
+        & git -c credential.interactive=never -c http.sslBackend=openssl clone --depth 1 --branch n8.1.1 https://github.com/FFmpeg/FFmpeg.git $source
+        if ($LASTEXITCODE) { throw 'FFmpeg checkout failed' }
+    }
+
+    $actual = & git -C $source rev-parse HEAD
+    if ($LASTEXITCODE -or $actual -ne $revision) { throw "Unexpected FFmpeg revision: $actual" }
 }
-$actual = & git -C $source rev-parse HEAD
-if ($LASTEXITCODE -or $actual -ne $revision) { throw "Unexpected FFmpeg revision: $actual" }
+finally {
+    if ($checkoutLock) { $checkoutMutex.ReleaseMutex() }
+    $checkoutMutex.Dispose()
+}
 foreach ($library in 'libavcodec', 'libavutil', 'libavformat', 'libswscale', 'libswresample') {
     $original = Join-Path $PSScriptRoot "../3rdparty/ffmpeg/include/$library/version.h"
     $selected = Join-Path $source "$library/version.h"
