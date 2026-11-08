@@ -104,5 +104,6 @@ void *DynamicLibrary::HandleSet::DLSym(void *Handle, const char *Symbol) {
 manifest["port_helpers"] = {"compat/llvm_ps4_process.hpp":
     hashlib.sha256((ROOT / "compat/llvm_ps4_process.hpp").read_bytes()).hexdigest()}
 output = ROOT / ".build-native-package" / "llvm-source-preparation.json"
+output.parent.mkdir(parents=True, exist_ok=True)
 output.write_text(json.dumps(manifest, indent=2) + "\n")
 print("Prepared pinned LLVM OS support:", output)

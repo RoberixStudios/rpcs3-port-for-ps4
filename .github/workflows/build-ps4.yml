@@ -1,0 +1,225 @@
+name: Build RPCS3 PS4 Native PKG
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_jobs:
+        description: "Parallel build jobs"
+        required: true
+        default: "4"
+        type: choice
+        options: ["2", "4", "6"]
+  push:
+    branches: [main]
+    paths:
+      - "rpcs3-ps4/**"
+      - "orbis-compat/**"
+      - "BUILDING.md"
+      - ".github/workflows/build-ps4.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ps4-native-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 360
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up CMake
+        uses: lukka/get-cmake@latest
+
+      - name: Verify host tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($tool in 'git', 'cmake', 'python') {
+            if (!(Get-Command $tool -ErrorAction SilentlyContinue)) { throw "Required host tool not found: $tool" }
+          }
+          if (!(Get-Command ninja -ErrorAction SilentlyContinue)) {
+            choco install ninja -y --no-progress
+            if ($LASTEXITCODE) { throw 'Ninja installation failed' }
+          }
+          git --version
+          cmake --version
+          python --version
+          ninja --version
+          dotnet --info
+
+      - name: Download pinned toolchains and dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tools = Join-Path $env:RUNNER_TEMP 'rpcs3-ps4-tools'
+          New-Item -ItemType Directory -Force $tools | Out-Null
+          $sdkArchive = Join-Path $tools 'openorbis.tar.gz'
+          $llvmArchive = Join-Path $tools 'llvm-mingw.zip'
+          $mesaArchive = Join-Path $tools 'mesa.tar.gz'
+
+          python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/toolchain-llvm-18.tar.gz', r'$sdkArchive')"
+          python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/mstorsjo/llvm-mingw/releases/download/20240619/llvm-mingw-20240619-ucrt-x86_64.zip', r'$llvmArchive')"
+          python -c "import urllib.request; urllib.request.urlretrieve('https://github.com/orbis-ports/mesa-ps4/releases/download/orbis-mesa-4c934ebf9cda/orbis-mesa-4c934ebf9cda.tar.gz', r'$mesaArchive')"
+
+          $expected = @{
+            $sdkArchive = '3c7cd5bb593ca74fa1c13fd59f3938dc0fc07985167f7275063019e63abe4526'
+            $mesaArchive = '4dd2b834ee97c5de4ce423244078db07c161426030ca20c175143fb9ef26da53'
+          }
+          foreach ($file in $expected.Keys) {
+            $actual = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $expected[$file]) { throw "SHA-256 mismatch: $file" }
+          }
+
+          $sdkExtract = Join-Path $tools 'openorbis'
+          $llvmExtract = Join-Path $tools 'llvm-mingw'
+          $mesaExtract = Join-Path $tools 'mesa'
+          New-Item -ItemType Directory -Force $sdkExtract, $llvmExtract, $mesaExtract | Out-Null
+          tar -xzf $sdkArchive -C $sdkExtract
+          Expand-Archive -LiteralPath $llvmArchive -DestinationPath $llvmExtract -Force
+          tar -xzf $mesaArchive -C $mesaExtract
+
+          $sdkCandidates = @((Get-Item -LiteralPath $sdkExtract)) + @(Get-ChildItem -LiteralPath $sdkExtract -Directory -Recurse)
+          $sdk = $sdkCandidates | Where-Object { (Test-Path (Join-Path $_.FullName 'include/orbis')) -and
+                                                  (Test-Path (Join-Path $_.FullName 'lib/libc++.a')) -and
+                                                  (Test-Path (Join-Path $_.FullName 'link.x')) } |
+            Select-Object -First 1
+          if (!$sdk) { throw 'Could not locate the extracted OpenOrbis PS4Toolchain root' }
+          $llvm = Get-ChildItem -LiteralPath $llvmExtract -Directory -Recurse |
+            Where-Object { (Test-Path (Join-Path $_.FullName 'bin/clang++.exe')) -and
+                           (Test-Path (Join-Path $_.FullName 'bin/llvm-nm.exe')) } |
+            Select-Object -First 1
+          if (!$llvm) { throw 'Could not locate llvm-mingw bin directory' }
+          $mesa = Get-ChildItem -LiteralPath $mesaExtract -Directory -Recurse |
+            Where-Object { $_.Name -eq 'orbis-mesa-4c934ebf9cda' } |
+            Select-Object -First 1
+          if (!$mesa) { throw 'Could not locate the pinned Mesa bundle directory' }
+
+          "RPCS3_PS4_SDK=$($sdk.FullName)" >> $env:GITHUB_ENV
+          "RPCS3_PS4_LLVM_BIN=$($llvm.FullName)/bin" >> $env:GITHUB_ENV
+          "RPCS3_PS4_MESA_BUNDLE=$($mesa.FullName)" >> $env:GITHUB_ENV
+          "RPCS3_PS4_TOOLS=$tools" >> $env:GITHUB_ENV
+
+      - name: Prepare pinned source dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $portingKit = Join-Path $env:GITHUB_WORKSPACE 'orbis-porting-kit'
+          git clone https://github.com/orbis-ports/orbis-porting-kit.git $portingKit
+          git -C $portingKit checkout 213b0c38ff25ea7ca402c8844a6494086d0f1cae
+          if ($LASTEXITCODE) { throw 'Could not check out the pinned orbis-porting-kit commit' }
+
+          $repo = Join-Path $env:GITHUB_WORKSPACE 'rpcs3-ps4'
+          # The outer repository stores the RPCS3 source as a directory. The native
+          # packaging scripts expect that directory itself to be a Git work tree.
+          git -C $repo init
+          if ($LASTEXITCODE) { throw 'Could not initialize the source metadata repository' }
+          git -C $repo update-index --add --cacheinfo '160000,ca7933e47d3a3451d81e72ac174dcb5aa28b59d1,3rdparty/llvm/llvm'
+          if ($LASTEXITCODE) { throw 'Could not record the pinned LLVM gitlink' }
+          git -C $repo -c user.name='GitHub Actions' -c user.email='actions@github.com' commit --allow-empty -m 'Record RPCS3 source and LLVM pin for native build'
+          if ($LASTEXITCODE) { throw 'Could not create local source metadata commit' }
+
+          $env:OO_PS4_TOOLCHAIN = $env:RPCS3_PS4_SDK
+          $env:RPCS3_PS4_LLVM_BIN = $env:RPCS3_PS4_LLVM_BIN
+          New-Item -ItemType Directory -Force (Join-Path $repo 'ps4-port/.build-tools') | Out-Null
+          $ninjaCommand = Get-Command ninja -CommandType Application -ErrorAction Stop
+          $ninjaPath = $ninjaCommand.Path
+          if ([string]::IsNullOrWhiteSpace($ninjaPath) -or !(Test-Path -LiteralPath $ninjaPath -PathType Leaf)) {
+            throw "Could not resolve the Ninja executable path. Command details: $($ninjaCommand | Format-List * | Out-String)"
+          }
+          Copy-Item -LiteralPath $ninjaPath -Destination (Join-Path $repo 'ps4-port/.build-tools/ninja.exe') -Force
+          & "$repo/ps4-port/prepare-abseil.ps1"
+          if ($LASTEXITCODE) { throw 'Abseil preparation failed' }
+          & "$repo/ps4-port/prepare-make.ps1" -GitUsrBin 'C:/Program Files/Git/usr/bin'
+          if ($LASTEXITCODE) { throw 'GNU Make preparation failed' }
+
+      - name: Restore console LLVM build cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            rpcs3-ps4/ps4-port/deps/llvm-project-ca7933e47d3a3451d81e72ac174dcb5aa28b59d1
+            rpcs3-ps4/ps4-port/deps/llvm-project-ca7933e47d3a3451d81e72ac174dcb5aa28b59d1.tar.gz
+            rpcs3-ps4/ps4-port/.build-llvm-host
+            rpcs3-ps4/ps4-port/.build-llvm-orbis
+            rpcs3-ps4/ps4-port/.build-native-package/llvm-source-preparation.json
+          key: ${{ runner.os }}-llvm-ca7933e47d3a3451d81e72ac174dcb5aa28b59d1-openorbis-054-llvm-mingw-20240619-${{ hashFiles('rpcs3-ps4/ps4-port/build-llvm.ps1', 'rpcs3-ps4/ps4-port/fetch-llvm.py', 'rpcs3-ps4/ps4-port/prepare-llvm.py', 'rpcs3-ps4/ps4-port/llvm-toolchain.cmake', 'rpcs3-ps4/ps4-port/toolchain.cmake', 'rpcs3-ps4/ps4-port/compat/llvm_ps4_process.hpp') }}
+          restore-keys: |
+            ${{ runner.os }}-llvm-ca7933e47d3a3451d81e72ac174dcb5aa28b59d1-openorbis-054-llvm-mingw-20240619-
+
+      - name: Build console LLVM
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = Join-Path $env:GITHUB_WORKSPACE 'rpcs3-ps4'
+          & "$repo/ps4-port/build-llvm.ps1" -Sdk $env:RPCS3_PS4_SDK -CompilerBin $env:RPCS3_PS4_LLVM_BIN -Jobs ${{ inputs.build_jobs || '4' }}
+          if ($LASTEXITCODE) { throw 'Console LLVM build failed' }
+
+      - name: Save console LLVM build cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            rpcs3-ps4/ps4-port/deps/llvm-project-ca7933e47d3a3451d81e72ac174dcb5aa28b59d1
+            rpcs3-ps4/ps4-port/deps/llvm-project-ca7933e47d3a3451d81e72ac174dcb5aa28b59d1.tar.gz
+            rpcs3-ps4/ps4-port/.build-llvm-host
+            rpcs3-ps4/ps4-port/.build-llvm-orbis
+            rpcs3-ps4/ps4-port/.build-native-package/llvm-source-preparation.json
+          key: ${{ runner.os }}-llvm-ca7933e47d3a3451d81e72ac174dcb5aa28b59d1-openorbis-054-llvm-mingw-20240619-${{ hashFiles('rpcs3-ps4/ps4-port/build-llvm.ps1', 'rpcs3-ps4/ps4-port/fetch-llvm.py', 'rpcs3-ps4/ps4-port/prepare-llvm.py', 'rpcs3-ps4/ps4-port/llvm-toolchain.cmake', 'rpcs3-ps4/ps4-port/toolchain.cmake', 'rpcs3-ps4/ps4-port/compat/llvm_ps4_process.hpp') }}
+
+      - name: Configure and build RPCS3 ELF
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = Join-Path $env:GITHUB_WORKSPACE 'rpcs3-ps4'
+          $env:OO_PS4_TOOLCHAIN = $env:RPCS3_PS4_SDK
+          $env:RPCS3_PS4_LLVM_BIN = $env:RPCS3_PS4_LLVM_BIN
+          $version = [regex]::Match((Get-Content "$repo/rpcs3/util/ps4_build_version.hpp" -Raw),
+            'ps4_build_version\[\]\s*=\s*"([0-9]+\.[0-9]{2})"').Groups[1].Value
+          if (!$version) { throw 'Could not read PS4 build version' }
+          "RPCS3_PS4_VERSION=$version" >> $env:GITHUB_ENV
+          cmake -S $repo -B "$repo/ps4-port/.build-abi" -G Ninja `
+            "-DCMAKE_MAKE_PROGRAM=$repo/ps4-port/.build-tools/ninja.exe" `
+            -DRPCS3_PS4_PORT=ON `
+            "-DCMAKE_TOOLCHAIN_FILE=$repo/ps4-port/toolchain.cmake" `
+            "-DRPCS3_PS4_SDK=$env:RPCS3_PS4_SDK" `
+            "-DRPCS3_PS4_LLVM_BIN=$env:RPCS3_PS4_LLVM_BIN" `
+            "-DRPCS3_PS4_ORBIS_COMPAT=$env:GITHUB_WORKSPACE/orbis-compat" `
+            "-DRPCS3_PS4_PORTING_KIT=$env:GITHUB_WORKSPACE/orbis-porting-kit" `
+            "-DRPCS3_PS4_MESA_BUNDLE=$env:RPCS3_PS4_MESA_BUNDLE" `
+            -DRPCS3_PS4_WITH_LLVM=ON
+          if ($LASTEXITCODE) { throw 'CMake configuration failed' }
+          cmake --build "$repo/ps4-port/.build-abi" --target rpcs3_ps4_elf --parallel ${{ inputs.build_jobs || '4' }}
+          if ($LASTEXITCODE) { throw 'RPCS3 native ELF build failed' }
+
+      - name: Package and validate PKG
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = Join-Path $env:GITHUB_WORKSPACE 'rpcs3-ps4'
+          & "$repo/ps4-port/package-native.ps1" -Sdk $env:RPCS3_PS4_SDK -LlvmTools $env:RPCS3_PS4_LLVM_BIN -Version $env:RPCS3_PS4_VERSION
+          if ($LASTEXITCODE) { throw 'PKG packaging or validation failed' }
+
+      - name: Upload validated package
+        uses: actions/upload-artifact@v4
+        with:
+          name: RPCS3-PS4-native-${{ github.sha }}
+          path: |
+            rpcs3-ps4/ps4-port/dist/*.pkg
+            rpcs3-ps4/ps4-port/dist/*.sha256
+            rpcs3-ps4/ps4-port/dist/build-manifest-*.json
+            rpcs3-ps4/ps4-port/dist/TUTORIAL.txt
+            rpcs3-ps4/ps4-port/dist/TESTAR_NO_PS4.txt
+          if-no-files-found: error
+          compression-level: 0
