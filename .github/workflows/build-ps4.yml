@@ -39,7 +39,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
 
       - name: Set up CMake
         uses: lukka/get-cmake@latest
@@ -48,9 +47,12 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          foreach ($tool in 'git', 'cmake', 'python', 'ninja', '7z') {
-            $found = Get-Command $tool -ErrorAction SilentlyContinue
-            if (!$found) { throw "Required host tool not found: $tool" }
+          foreach ($tool in 'git', 'cmake', 'python') {
+            if (!(Get-Command $tool -ErrorAction SilentlyContinue)) { throw "Required host tool not found: $tool" }
+          }
+          if (!(Get-Command ninja -ErrorAction SilentlyContinue)) {
+            choco install ninja -y --no-progress
+            if ($LASTEXITCODE) { throw 'Ninja installation failed' }
           }
           git --version
           cmake --version
