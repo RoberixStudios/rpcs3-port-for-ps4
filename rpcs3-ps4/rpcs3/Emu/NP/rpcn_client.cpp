@@ -173,6 +173,7 @@ void fmt_class_string<rpcn::CommandType>::format(std::string& out, u64 arg)
 			case rpcn::CommandType::UnlockTrophy: return "UnlockTrophy";
 			case rpcn::CommandType::SyncTrophies: return "SyncTrophies";
 			case rpcn::CommandType::DeleteTrophies: return "DeleteTrophies";
+			case rpcn::CommandType::GetTss: return "GetTss";
 			}
 
 			return unknown;
@@ -269,7 +270,7 @@ namespace rpcn
 		rpcn_log.notice("online: %s, pr_com_id: %s, pr_title: %s, pr_status: %s, pr_comment: %s, pr_data: %s", online ? "true" : "false", pr_com_id.data, pr_title, pr_status, pr_comment, fmt::buf_to_hexstring(pr_data.data(), pr_data.size()));
 	}
 
-	constexpr u32 RPCN_PROTOCOL_VERSION = 32;
+	constexpr u32 RPCN_PROTOCOL_VERSION = 34;
 	constexpr usz RPCN_HEADER_SIZE = 15;
 
 	const char* error_to_explanation(rpcn::ErrorType error)
